@@ -1,33 +1,41 @@
 import asyncio
 from playwright.async_api import async_playwright
-from bs4 import BeautifulSoup
+from markdownify import markdownify as md
 
 
 def main():
     site_url = "https://paste.fitgirl-repacks.site/?fad3baf0fad437cf#HVjnbfAB9Hk8TXWpUndxnjuseaytwd46RLX8SzZfv1Ku"
 
-    soup = asyncio.run(scrape_url(site_url))
-    # saving the data to a file
-
-    with open("scraped_data.html", "w", encoding="utf-8") as file:
-        file.write(soup.prettify())
-        print("Data saved to scraped_data.html")
+    html_content = asyncio.run(fetch_page(site_url))
+    export_as_markdown(html_content)
 
 
-async def scrape_url(site_url):
+async def fetch_page(site_url):
     async with async_playwright() as playwright:
         # launching the browser
-        browser = await playwright.chromium.launch(headless=False)
+        browser = await playwright.chromium.launch(headless=True)
         page = await browser.new_page()
 
         print("Navigating to the site.....")
         await page.goto(site_url, wait_until="networkidle")
 
+        # extracting RAW the html content
         html_content = await page.content()
+        await browser.close()
 
-        soup = BeautifulSoup(html_content, "html.parser")
+        return html_content
 
-        return soup
+
+def export_as_markdown(html_content):
+    # converting into markdown format for easier extraction
+    markdown_content = md(
+        html_content, heading_style="ATX", strip=["script", "style", "img", "svg"]
+    )
+
+    # saving the data for later usage
+    with open("scraped_data.md", "w", encoding="utf-8") as file:
+        file.write(markdown_content)
+    print("✅ Data saved to scraped_data.md")
 
 
 main()
