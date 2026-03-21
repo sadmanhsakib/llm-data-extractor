@@ -11,6 +11,7 @@ test.py
 *.html
 scraped_data.md
 .env
+*.txt
 
 # Distribution / packaging
 .Python

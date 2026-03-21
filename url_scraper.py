@@ -6,14 +6,14 @@ from markdownify import markdownify as md
 load_dotenv()
 
 
-def main():
+def main() -> None:
     site_url = os.getenv("SITE_URL")
 
     html_content = asyncio.run(fetch_page(site_url))
     export_as_markdown(html_content)
 
 
-async def fetch_page(site_url):
+async def fetch_page(site_url: str) -> str:
     async with async_playwright() as playwright:
         # launching the browser
         browser = await playwright.chromium.launch(headless=True)
@@ -29,7 +29,7 @@ async def fetch_page(site_url):
         return html_content
 
 
-def export_as_markdown(html_content):
+def export_as_markdown(html_content: str) -> None:
     # converting into markdown format for easier extraction
     markdown_content = md(
         html_content, heading_style="ATX", strip=["script", "style", "img", "svg"]
