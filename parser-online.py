@@ -1,5 +1,5 @@
-import instructor
 import os
+import instructor
 from groq import Groq
 from pydantic import BaseModel, HttpUrl
 from typing import List
@@ -14,12 +14,12 @@ base_url = os.getenv("BASE_URL")
 api_key = os.getenv("API_KEY")
 
 # Initialize the Instructor client with Groq as the LLM backend.
-# The 'from_groq' method wraps the standard Groq client to add support 
+# The 'from_groq' method wraps the standard Groq client to add support
 # for returning structured Pydantic models (using JSON mode).
 client = instructor.from_groq(Groq(api_key=api_key), mode=instructor.Mode.JSON)
 
-# Instructions provided to the LLM to dictate its behavior, ensuring 
-# it outputs only valid JSON representing download links.
+# Instructions provided to the LLM to dictate its behavior,
+# ensuring it outputs only valid JSON representing download links.
 SYSTEM_PROMPT = """
 You are a data extraction assistant.
 Extract lead information from the given content.
@@ -48,11 +48,14 @@ def main() -> None:
     # Have the LLM process the markdown data to extract the links
     results = generate_output(markdown_data)
 
+    print(results)
     # Save the extracted links into a text file, separated by commas
     with open("links.txt", "w") as file:
         for link in results.links:
-            # Convert HttpUrl to string before writing
-            file.write(str(link.url) + ",")
+            # Convert HttpUrl to string
+            urls_str = str(link.url) + ","
+        # Remove the last comma before writing
+        file.write(urls_str[:-1])
 
     print("Links extracted successfully to links.txt")
 
@@ -67,12 +70,17 @@ def generate_output(prompt: str) -> LinkCollection:
     # Make the API call to Groq using the Instructor wrapper.
     # The 'response_model' parameter dictates the required JSON schema,
     # and Instructor handles parsing the LLM's raw text response into python objects.
-    response = client.chat.completions.create(
+    response, completion = client.chat.completions.create_with_completion(
         model=model_name,
         messages=messages,
         temperature=0.0,  # 0.0 makes the model more deterministic and focused on extraction
         response_model=LinkCollection,
     )
+
+    print("Prompt tokens:", completion.usage.prompt_tokens)
+    print("Completion tokens:", completion.usage.completion_tokens)
+    print("Total tokens:", completion.usage.total_tokens)
+
     return response
 
 
