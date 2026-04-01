@@ -1,5 +1,5 @@
 import os, time
-import instructor
+import instructor, tiktoken
 from groq import Groq
 from pydantic import BaseModel, HttpUrl
 from typing import List
@@ -45,9 +45,14 @@ def main() -> None:
     with open("data.md", "r") as file:
         markdown_data = file.read()
 
+    print(f"Estimated Tokens: {count_tokens(markdown_data)}")
+
     # Have the LLM process the markdown data to extract the links
     results = generate_output(markdown_data)
+    export(results)
 
+
+def export(results: LinkCollection) -> None:
     # Save the extracted urls into a text file, separated by commas
     with open("urls.txt", "w") as file:
         urls_str = ""
@@ -76,6 +81,7 @@ def generate_output(prompt: str) -> LinkCollection:
         messages=messages,
         temperature=0.0,  # 0.0 makes the model more deterministic and focused on extraction
         response_model=LinkCollection,
+        max_tokens=10000,
     )
 
     print("Prompt tokens:", completion.usage.prompt_tokens)
@@ -83,6 +89,11 @@ def generate_output(prompt: str) -> LinkCollection:
     print("Total tokens:", completion.usage.total_tokens)
 
     return response
+
+
+def count_tokens(text: str) -> int:
+    encoding = tiktoken.get_encoding("cl100k_base")
+    return len(encoding.encode(text))
 
 
 if __name__ == "__main__":
