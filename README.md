@@ -1,296 +1,221 @@
 # llm_structured_scraper
 
-A two-stage pipeline that uses a headless browser to render JavaScript-heavy webpages, converts the result to token-efficient Markdown, and delegates semantic URL extraction to an LLM — producing strictly schema-validated, structured output via [Pydantic](https://docs.pydantic.dev/) and [Instructor](https://python.useinstructor.com/).
+A two-stage pipeline that renders JavaScript-heavy pages in a headless browser, converts them to token-efficient Markdown, and uses an LLM to extract **structured data** you define with [Pydantic](https://docs.pydantic.dev/)—enforced at the API boundary via [Instructor](https://python.useinstructor.com/).
 
-Traditional scrapers break when DOM structure changes. This tool replaces brittle CSS selectors and regex with an LLM that understands *meaning*, making it robust to layout changes, obfuscated markup, and dynamically injected content.
+Traditional scrapers depend on fixed CSS selectors and regex. When layouts change, they break. This project sends cleaned page content to an LLM with a strict schema and system prompt, so extraction follows **meaning** rather than DOM structure. You choose the fields (URLs, titles, prices, dates, and so on); the pipeline stays the same.
 
----
+## Features
 
-## 📑 Table of Contents
+- **Headless scraping** — Playwright (with stealth) loads dynamic pages; configurable `wait_until` for sites that never reach `networkidle`.
+- **HTML → Markdown** — Strips scripts, styles, navigation, and other noise before conversion to cut tokens while keeping headings, lists, and links.
+- **Token-aware chunking** — Splits long pages at line boundaries with `tiktoken` so chunks stay within model limits.
+- **Schema-driven extraction** — Define a Pydantic model and prompt in `scripts/main.py`; Instructor validates every LLM response.
+- **CSV export** — Aggregated results are written to `data/data.csv` for spreadsheets or downstream scripts.
+- **Cloud or local LLMs** — Groq (remote) or Ollama (local) via a single `is_local` flag.
+- **Usage reporting** — Per-chunk prompt, completion, and total token counts for cost and debugging.
 
-- [Features](#-features)
-- [Architecture](#-architecture)
-- [How It Works](#-how-it-works)
-- [Project Structure](#-project-structure)
-- [Prerequisites](#-prerequisites)
-- [Installation](#-installation)
-- [Configuration](#%EF%B8%8F-configuration)
-- [Usage](#-usage)
-- [LLM Backend Selection](#-llm-backend-selection)
-- [Token Budget & Chunking](#-token-budget--chunking)
-- [Technologies](#-technologies)
-- [Troubleshooting](#-troubleshooting)
-- [License](#-license)
-
----
-
-## ✨ Features
-
-- 🌐 **Headless Browser Scraping** — Playwright renders JavaScript-heavy pages before extraction, ensuring content injected via XHR or client-side frameworks is captured.
-- 📝 **HTML → Markdown Conversion** — Non-semantic elements (`<script>`, `<style>`, `<nav>`, `<footer>`, `<img>`, `<svg>`) are stripped before conversion, shrinking token usage while preserving structural meaning (headings, lists, links).
-- 🧩 **Token-Aware Chunking** — Long pages are split into chunks respecting a configurable token ceiling. Splitting occurs at line boundaries to avoid breaking mid-sentence, preventing context window overflows.
-- 🤖 **LLM-Powered Extraction** — An LLM semantically identifies and extracts URLs from unstructured prose, far more resilient than DOM traversal or pattern matching.
-- 🔒 **Schema-Validated Output** — The [Instructor](https://python.useinstructor.com/) library enforces structured JSON output conforming to a Pydantic `LinkCollection` model, guaranteeing every returned value is a valid `HttpUrl` — no post-processing required.
-- ☁️ **Cloud & Local Inference** — Switch between Groq (cloud, fast) and Ollama (local, private) via a single flag. Useful when working with sensitive page content or in air-gapped environments.
-- 📊 **Token Usage Reporting** — Prompt, completion, and total token counts are printed per chunk for cost visibility and debugging.
-
----
-
-## 🏗️ Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                              Entry Point                                │
-│                           scripts/main.py                               │
-└────────────────────────────────┬────────────────────────────────────────┘
-                                 │  calls parser.main(is_local=True/False)
-          ┌──────────────────────┴──────────────────────┐
-          │                                             │
-          ▼                                             ▼
-  ┌───────────────┐                           ┌─────────────────────┐
-  │  scraper.py   │                           │     parser.py       │
-  │               │                           │                     │
-  │  Playwright   │   data/webpage.md         │  chunk_text()       │
-  │  (Chromium)   │ ─────────────────────────▶│  → LLM (Groq /      │
-  │  + markdownify│                           │    Ollama)          │
-  └───────────────┘                           │  → Instructor       │
-          ▲                                   │  → Pydantic         │
-          │                                   └──────────┬──────────┘
-    SITE_URL (.env)                                       │
-                                                          ▼
-                                                  data/urls.txt
-                                               (one URL per line)
-```
-
-**Data flow:**
-
-1. `scraper.py` launches a headless Chromium browser, navigates to `SITE_URL`, waits for network idle, then strips and converts the HTML to Markdown, writing `data/webpage.md`.
-2. `parser.py` reads `data/webpage.md`, splits it into token-bounded chunks, and sends each chunk to the configured LLM. Responses are coerced into `LinkCollection` objects by Instructor and aggregated.
-3. All extracted URLs are written to `data/urls.txt`, one per line.
-
----
-
-## 🔍 How It Works
-
-### Stage 1 — Scraping (`scraper.py`)
-
-Playwright launches a headless Chromium instance and navigates to the target URL using `wait_until="networkidle"` — a deliberate choice over `"domcontentloaded"` because many modern pages inject their primary content (links, tables, download buttons) via deferred JavaScript after initial DOM load.
-
-The raw HTML is passed to `markdownify` with an explicit strip list that removes non-textual elements. This has two compounding benefits:
-- Reduces token count significantly (tested pages drop from 50k+ to <10k tokens).
-- Removes noise (navigation menus, cookie banners, ad scripts) that would otherwise dilute the LLM's focus.
-
-### Stage 2 — Parsing (`parser.py`)
-
-The Markdown content is split into chunks using `chunk_text()`, which iterates line-by-line and flushes a chunk when the running token count would exceed the ceiling. Splitting at line boundaries (rather than character boundaries) avoids cutting mid-sentence or mid-URL, which would cause extraction failures.
-
-Each chunk is sent to the LLM with:
-- A strict system prompt that prohibits explanatory prose and mandates JSON-only output.
-- `temperature=0.0` to maximize determinism and eliminate hallucinated URLs.
-- `response_model=LinkCollection` passed to Instructor, which wraps the underlying API client and automatically retries if the response fails Pydantic validation (configurable via `max_retries`).
-
-Results across all chunks are accumulated into a single `LinkCollection` and written to `data/urls.txt`.
-
----
-
-## 📁 Project Structure
-
-```
-llm-data-extractor/
-├── scripts/
-│   ├── main.py          # Unified entry point — runs the full pipeline
-│   ├── scraper.py       # Stage 1: Headless browser scraping & HTML→Markdown
-│   └── parser.py        # Stage 2: LLM extraction with structured output
-├── data/                # Runtime-generated output (gitignored)
-│   ├── webpage.md       # Intermediate Markdown from scraper
-│   └── urls.txt         # Final extracted URLs, one per line
-├── example.env          # Environment variable template
-├── requirements.txt     # Pinned Python dependencies
-├── .gitignore
-└── README.md
-```
-
-> `data/` is gitignored. It is created automatically at runtime.
-
----
-
-## 📋 Prerequisites
-
-- **Python** 3.10 or higher
-- **Playwright Chromium** browser binaries (installed separately — see below)
-- One of:
-  - A **Groq API key** for cloud inference
-  - **[Ollama](https://ollama.com/)** running locally with your chosen model pulled
-
----
-
-## 🚀 Installation
-
-**1. Clone the repository:**
+## Quick start
 
 ```bash
 git clone https://github.com/sadmanhsakib/llm_structured_scraper.git
 cd llm_structured_scraper
-```
 
-**2. Create and activate a virtual environment:**
-
-```bash
 python -m venv .venv
+.venv\Scripts\activate          # Windows
+# source .venv/bin/activate     # macOS / Linux
 
-# Windows
-.venv\Scripts\activate
-
-# macOS / Linux
-source .venv/bin/activate
-```
-
-**3. Install Python dependencies:**
-
-```bash
 pip install -r requirements.txt
-```
-
-**4. Install Playwright browser binaries:**
-
-```bash
 playwright install chromium
+
+copy example.env .env           # Windows
+# cp example.env .env           # macOS / Linux
 ```
 
----
-
-## ⚙️ Configuration
-
-Copy the environment template and populate it:
+Edit `.env` with `SITE_URL`, model names, and (for Groq) `API_KEY`. Customize the extraction schema and prompt in `scripts/main.py` (see [Customization](#customization)), then run from the **repository root**:
 
 ```bash
-# Windows
-copy example.env .env
-
-# macOS / Linux
-cp example.env .env
+python scripts/main.py
 ```
 
-| Variable | Description | Required For |
-|---|---|---|
-| `SITE_URL` | Full URL of the page to scrape | `scraper.py` |
-| `LOCAL_MODEL_NAME` | Ollama model identifier (e.g. `deepseek-r1:14b`) | Local inference |
-| `REMOTE_MODEL_NAME` | Groq model identifier (e.g. `llama-3.3-70b-versatile`) | Cloud inference |
-| `API_KEY` | Your Groq API key | Cloud inference |
+Output: `data/webpage.md` (intermediate) and `data/data.csv` (final).
 
-> **Note:** `LOCAL_MODEL_NAME` and `REMOTE_MODEL_NAME` are distinct variables — you can configure both and switch between them without editing the `.env` file.
+## How it works
 
----
-
-## 📖 Usage
-
-The pipeline runs in two sequential stages. Each stage can be run independently if you already have the intermediate output from a previous run.
-
-### Full Pipeline (recommended)
-
-```bash
-cd scripts
-python main.py
+```
+SITE_URL (.env)
+      │
+      ▼
+┌─────────────┐     data/webpage.md     ┌─────────────┐     data/data.csv
+│  scraper.py │ ──────────────────────► │  parser.py  │ ─────────────────►
+│  Playwright │                         │  chunk →    │
+│  + Markdown │                         │  LLM → CSV  │
+└─────────────┘                         └─────────────┘
+      ▲                                         ▲
+      │                                         │
+ scripts/main.py  (Schema, SYSTEM_PROMPT, is_local)
 ```
 
-By default, `main.py` runs the parser in **local mode** (`is_local=True`). To switch to cloud mode, edit line 7 of `main.py`:
+1. **Scrape** — `fetch_page()` loads the URL and returns HTML. `export_as_markdown()` strips non-content tags, converts to Markdown, and saves `data/webpage.md`.
+2. **Extract** — `extract_data_from_markdown()` chunks the Markdown, sends each chunk to the LLM with your system prompt, merges validated records, and writes `data/data.csv`.
+
+Temperature is `0.0` to reduce hallucinations. Responses must match `SchemaCollection` (a list of your `Schema` model).
+
+## Customization
+
+The pipeline is generic: you control **what** is extracted by editing `scripts/main.py`.
+
+**1. Pydantic schema** — fields must match what you ask the model to return:
 
 ```python
-# Local (Ollama)
-parser.main(is_local=True)
-
-# Cloud (Groq)
-parser.main(is_local=False)
+class Schema(BaseModel):
+    title: str
+    duration: str
+    url: HttpUrl
 ```
 
-### Run Stages Individually
+`parser.py` wraps these in `SchemaCollection` (`collections: List[main.Schema]`). After you change `Schema`, update `SYSTEM_PROMPT` so the model knows which fields to fill.
 
-**Stage 1 — Scrape and convert to Markdown:**
+**2. System prompt** — keep instructions strict (JSON only, no markdown fences, no prose):
+
+```python
+SYSTEM_PROMPT = """
+You are a data extraction assistant.
+Respond ONLY with a valid JSON object. No explanation, no markdown fences.
+Extract only the information related to the VIDEO.
+For example, video title, video duration, video url.
+"""
+```
+
+**3. LLM backend** — pass `is_local` to `extract_data_from_markdown()`:
+
+```python
+parser.extract_data_from_markdown(
+    md_path=md_path,
+    SYSTEM_PROMPT=SYSTEM_PROMPT,
+    is_local=False,   # True → Ollama, False → Groq
+)
+```
+
+**4. Page load behavior** — adjust `wait_until` when calling `fetch_page()` (`"load"`, `"domcontentloaded"`, or `"networkidle"`).
+
+**5. Chunk size** — defaults are 1,500 tokens (local) and 6,000 (remote). Override by passing a different `max_tokens` to `chunk_text()` in `parser.py` if needed.
+
+## Project structure
+
+```
+llm-data-extractor/
+├── scripts/
+│   ├── main.py       # Entry point: schema, prompt, orchestration
+│   ├── scraper.py    # Playwright fetch + HTML → Markdown
+│   ├── parser.py     # Chunking, LLM calls, CSV export
+│   └── test.py       # Optional utilities over data/data.csv
+├── data/             # Generated at runtime (gitignored)
+│   ├── webpage.md
+│   └── data.csv
+├── example.env
+├── requirements.txt
+└── README.md
+```
+
+Run commands from the **repository root** so paths like `data/webpage.md` resolve correctly.
+
+## Prerequisites
+
+- Python 3.10+
+- Playwright Chromium (`playwright install chromium`)
+- **Groq**: API key and model name in `.env`
+- **Ollama** (optional): [Ollama](https://ollama.com/) running locally with your model pulled
+
+## Configuration
+
+| Variable | Description |
+|----------|-------------|
+| `SITE_URL` | Page to scrape |
+| `LOCAL_MODEL_NAME` | Ollama model (e.g. `llama3.2`) |
+| `REMOTE_MODEL_NAME` | Groq model (e.g. `llama-3.3-70b-versatile`) |
+| `API_KEY` | Groq API key (remote only) |
+
+You can set both model variables and switch backends with `is_local` without editing `.env`.
+
+## Usage
+
+### Full pipeline
+
 ```bash
-cd scripts
-python scraper.py
-```
-Output: `data/webpage.md`
-
-**Stage 2 — Extract URLs from Markdown:**
-```bash
-cd scripts
-
-# Cloud inference (Groq)
-python parser.py
-
-# Local inference (Ollama) — edit is_local flag in __main__ block
-python parser.py
-```
-Output: `data/urls.txt`
-
----
-
-## 🤖 LLM Backend Selection
-
-| | Groq (Cloud) | Ollama (Local) |
-|---|---|---|
-| **Speed** | Very fast (LPU inference) | Depends on hardware |
-| **Privacy** | Data sent to Groq API | Fully local, no external calls |
-| **Cost** | Token-based API pricing | Free (compute only) |
-| **Setup** | API key required | Ollama + model pull required |
-| **Chunk size** | 6,000 tokens | 1,500 tokens (conservative default) |
-| **Internet required** | Yes | No |
-
-The local chunk ceiling is deliberately conservative at 1,500 tokens to remain compatible with mid-range models (7B–14B parameters) that have tighter effective context windows despite higher advertised limits.
-
----
-
-## 🧩 Token Budget & Chunking
-
-Token counting uses `tiktoken` with the `cl100k_base` encoding (GPT-4/Groq-compatible). This is an approximation for non-OpenAI models, but it is accurate enough to prevent context overflows without requiring a per-model tokenizer download.
-
-```
-Local mode:  max_tokens = 1,500  per chunk
-Remote mode: max_tokens = 6,000  per chunk
+python scripts/main.py
 ```
 
-Each chunk's token count is printed to the console. If you see a single chunk consuming the full budget, your page is content-dense — consider tightening the strip list in `scraper.py` or reducing `max_tokens` further.
+### Run stages separately
 
----
+**Scrape only** — from the repository root:
 
-## 🛠️ Technologies
+```python
+import sys, asyncio
+sys.path.insert(0, "scripts")
+from scraper import fetch_page, export_as_markdown
 
-| Library | Version | Purpose |
-|---|---|---|
-| [Playwright](https://playwright.dev/python/) | 1.58 | Headless browser automation |
-| [markdownify](https://github.com/matthewwithanm/python-markdownify) | 1.2 | HTML → Markdown conversion |
-| [Instructor](https://python.useinstructor.com/) | 1.14 | Structured LLM output enforcement |
-| [Pydantic](https://docs.pydantic.dev/) | 2.12 | Schema definition & URL validation |
-| [Groq](https://groq.com/) | 1.1 | Cloud LLM inference (fast) |
-| [Ollama](https://ollama.com/) | 0.6 | Local LLM inference server |
-| [tiktoken](https://github.com/openai/tiktoken) | 0.12 | Token estimation for chunking |
-| [python-dotenv](https://github.com/theskumar/python-dotenv) | 1.2 | Environment variable loading |
+html = asyncio.run(fetch_page("https://example.com", wait_until="load"))
+export_as_markdown(html)
+```
 
----
+**Extract only** — requires `data/webpage.md` and the same `Schema` / prompt as in `main.py`:
 
-## 🔧 Troubleshooting
+```python
+import main as app
+from parser import extract_data_from_markdown
 
-**`❌ Input file not found: data/webpage.md`**  
-Run `scraper.py` first to generate the intermediate file, or ensure you are running scripts from the `scripts/` directory where relative paths resolve correctly.
+extract_data_from_markdown(
+    md_path="../data/webpage.md",  # relative to scripts/ if cwd is scripts/
+    SYSTEM_PROMPT=app.SYSTEM_PROMPT,
+    is_local=False,
+)
+```
 
-**`⚠️ Model name not configured.`**  
-Check your `.env` file. For local mode, `LOCAL_MODEL_NAME` must be set. For cloud mode, both `REMOTE_MODEL_NAME` and `API_KEY` must be set.
+When using extract-only, run from the **repository root** and pass `md_path="data/webpage.md"` so paths match the full pipeline.
 
-**Playwright browser not found**  
-Run `playwright install chromium` in your activated virtual environment.
+## LLM backends
 
-**LLM returns empty `links` list**  
-The page likely contains no URLs matching the extraction prompt, or the chunk is too small to contain complete link contexts. Try increasing `max_tokens` in `parser.py` or inspecting `data/webpage.md` manually to confirm links are present.
+| | Groq (remote) | Ollama (local) |
+|---|---------------|----------------|
+| Speed | Fast | Hardware-dependent |
+| Privacy | Data sent to Groq | Stays on your machine |
+| Cost | API usage | Free (your compute) |
+| Setup | `API_KEY` + `REMOTE_MODEL_NAME` | Ollama + `LOCAL_MODEL_NAME` |
+| Default chunk size | 6,000 tokens | 1,500 tokens |
 
-**Ollama connection refused**  
-Ensure Ollama is running (`ollama serve`) and the model specified in `LOCAL_MODEL_NAME` has been pulled (`ollama pull <model>`).
+Local chunks use a smaller default to fit typical 7B–14B context windows.
 
-**Timeout on `page.goto()`**  
-Some pages do not reach a `networkidle` state (e.g., pages with long-polling or WebSocket connections). You can change the `wait_until` parameter in `scraper.py` to `"load"` or `"domcontentloaded"` as a fallback.
+## Token budget and chunking
 
----
+Chunk sizes use `tiktoken` with the `cl100k_base` encoding—an approximation for non-OpenAI models, but sufficient to avoid context overflows. Each chunk logs its estimated token count. If extraction misses items on dense pages, try a larger `max_tokens` or tighten the HTML strip list in `export_as_markdown()`.
 
-## 📄 License
+## Tech stack
 
-This project is provided as-is for educational and personal use. No warranty is expressed or implied.
+| Library | Role |
+|---------|------|
+| [Playwright](https://playwright.dev/python/) | Headless browser |
+| [playwright-stealth](https://github.com/AtuboDad/playwright_stealth) | Reduced bot detection |
+| [markdownify](https://github.com/matthewwithanm/python-markdownify) | HTML → Markdown |
+| [Instructor](https://python.useinstructor.com/) | Structured LLM output |
+| [Pydantic](https://docs.pydantic.dev/) | Schemas and validation |
+| [Groq](https://groq.com/) / [Ollama](https://ollama.com/) | Inference backends |
+| [tiktoken](https://github.com/openai/tiktoken) | Token counting |
+| [pandas](https://pandas.pydata.org/) | CSV export |
+
+Pinned versions are in `requirements.txt`.
+
+## Troubleshooting
+
+| Issue | What to try |
+|-------|-------------|
+| `Input file not found: data/webpage.md` | Run the scraper first, or run from the repo root. |
+| `Model name not configured` | Set `LOCAL_MODEL_NAME` or `REMOTE_MODEL_NAME` + `API_KEY` in `.env`. |
+| Playwright browser missing | `playwright install chromium` in your venv. |
+| Empty CSV / no rows | Inspect `data/webpage.md`; widen the prompt or chunk size; confirm the page contains the data you expect. |
+| Ollama connection refused | Start Ollama (`ollama serve`) and `ollama pull <model>`. |
+| Timeout on `page.goto()` | Use `wait_until="load"` or `"domcontentloaded"` instead of `"networkidle"`. |
+| Invalid JSON / validation errors | Tighten `SYSTEM_PROMPT`; consider `max_retries=3` in `generate_output()` for production. |
+
+## License
+
+Provided as-is for educational and personal use. No warranty is expressed or implied.
