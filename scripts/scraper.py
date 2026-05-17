@@ -5,33 +5,23 @@ This script uses Playwright to handle dynamic content and converts the resulting
 HTML into a clean Markdown format suitable for LLM processing.
 """
 
-import asyncio
-import os
-import time
-from dotenv import load_dotenv
+import asyncio, os, time
+from playwright_stealth import Stealth
 from playwright.async_api import async_playwright
 from markdownify import markdownify as md
 
-load_dotenv()
-
 
 def main() -> None:
-    site_url = os.getenv("SITE_URL")
-
-    html_content = asyncio.run(fetch_page(site_url))
-    
-    if html_content:
-        export_as_markdown(html_content)
-    else:
-        print("❌ No HTML content found")
+    asyncio.run(fetch_page("https://www.google.com"))
 
 
-async def fetch_page(site_url: str) -> str:
+async def fetch_page(site_url: str, wait_until : str = "networkidle") -> str:
     """
     Asynchronously fetches the HTML content of a given URL.
     
-    Uses Playwright to ensure that dynamic (JavaScript-rendered) content is 
-    fully loaded before capturing the page content.
+    Uses Playwright with stealth techniques to avoid detection by anti-bot
+    measures and ensures that dynamic (JavaScript-rendered) content is fully
+    loaded before capturing the page content.
     """
     async with async_playwright() as playwright:
         # Headless mode is used to run the browser in the background without a GUI,
@@ -39,12 +29,11 @@ async def fetch_page(site_url: str) -> str:
         browser = await playwright.chromium.launch(headless=True)
         page = await browser.new_page()
 
-        print("Navigating to the site.....")
-        
-        # 'networkidle' is used to wait until there are no more than 2 network 
-        # connections for at least 500ms. This ensures that most dynamic/lazy 
-        # content (like images or data via XHR) has finished loading.
-        await page.goto(site_url, wait_until="networkidle")
+        await Stealth().apply_stealth_async(page)
+
+        print(f"Navigating to the site: {site_url}")
+
+        await page.goto(site_url, wait_until=wait_until)
 
         html_content = await page.content()
         await browser.close()
@@ -52,7 +41,7 @@ async def fetch_page(site_url: str) -> str:
         return html_content
 
 
-def export_as_markdown(html_content: str) -> None:
+def export_as_markdown(html_content: str) -> str:
     """
     Converts HTML content to Markdown and saves it to a file.
     
@@ -76,10 +65,13 @@ def export_as_markdown(html_content: str) -> None:
     data_dir = "data"
     if not os.path.exists(data_dir):
         os.makedirs(data_dir)
-        
-    with open(os.path.join(data_dir, "webpage.md"), "w", encoding="utf-8") as file:
+    
+    output_path = os.path.join(data_dir, 'webpage.md')
+    with open(output_path, "w", encoding="utf-8") as file:
         file.write(markdown_content)
-    print(f"✅ Data saved to {os.path.join(data_dir, 'webpage.md')}")
+    print(f"✅ Data saved to {output_path}")
+    
+    return output_path
 
 
 if __name__ == "__main__":
